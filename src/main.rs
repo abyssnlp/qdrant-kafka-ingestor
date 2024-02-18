@@ -1,11 +1,22 @@
+mod models;
 use futures::stream::FuturesUnordered;
-use futures::{StreamExt, TryStreamExt};
-use qdrant_client::client::QdrantClient;
+use futures::StreamExt;
+use models::QdrantPoint;
+use qdrant_client::client::{Payload, QdrantClient};
+use qdrant_client::qdrant::{PointId, PointStruct};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::message::{BorrowedMessage, OwnedMessage};
 use rdkafka::Message;
+use serde::Serialize;
+
+pub type Result<T> = core::result::Result<T, ErrorType>;
+
+#[derive(Debug, Clone, Serialize)]
+pub enum ErrorType {
+    GenericError { e: String },
+}
 
 #[tokio::main]
 async fn main() {
@@ -41,6 +52,11 @@ async fn run_async_ingestor(brokers: String, group_id: String, input_topic: Stri
 
     let mut stream = consumer.stream();
 
+    // construct a queue and a timer;
+    // push to queue till threshold
+    // if queue reaches threshold or timer > time threshold: batch upsert -> reset queue, reset timer
+    // else keep pushing
+
     while let Some(result) = stream.next().await {
         match result {
             Ok(message) => {
@@ -60,26 +76,32 @@ async fn run_async_ingestor(brokers: String, group_id: String, input_topic: Stri
             Err(e) => eprintln!("Kafka error: {}", e),
         }
     }
-
-    // let stream = consumer.stream().try_for_each(|message| {
-    //     async move {
-    //         println!(
-    //             "Message offset: {}, Message partition: {}, Message key: {:?}, Message body: {:?}",
-    //             message.offset(),
-    //             message.partition(),
-    //             message.key_view::<str>(),
-    //             message.payload_view::<str>()
-    //         );
-
-    //         // more computation
-
-    //         Ok(())
-    //     }
-    // });
-
-    // stream.await.expect("Stream processing failed!")
 }
 
-async fn upload_to_qdrant(collection_name: String, client: QdrantClient) {
-    let result = client.upsert_points_batch_blocking(collection_name, None, vec![], None, 100);
+async fn upload_to_qdrant(
+    collection_name: String,
+    client: QdrantClient,
+    points: Vec<QdrantPoint>,
+) -> Result<()> {
+    let points = points
+        .into_iter()
+        .map(|point| {
+            let id = match point.id {
+                serde_json::Value::Number(n) => Ok(n.to_string()),
+                serde_json::Value::String(s) => Ok(s),
+                _ => Err(ErrorType::GenericError {
+                    e: String::from("Unknown PointID type"),
+                }),
+            }?;
+            Ok(PointStruct::new(id, point.vector, point.payload))
+        })
+        .collect::<Result<Vec<PointStruct>>>()?;
+
+    let result = client
+        .upsert_points_batch_blocking(collection_name, None, points, None, 100)
+        .await
+        .map_err(|e| ErrorType::GenericError { e: e.to_string() })?;
+
+    println!("{:?}", result.result);
+    Ok(())
 }
