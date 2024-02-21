@@ -1,13 +1,14 @@
 mod models;
+use std::sync::Arc;
+
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use models::QdrantPoint;
 use qdrant_client::client::{Payload, QdrantClient};
-use qdrant_client::qdrant::{PointId, PointStruct};
+use qdrant_client::qdrant::PointStruct;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
-use rdkafka::message::{BorrowedMessage, OwnedMessage};
 use rdkafka::Message;
 use serde::Serialize;
 
@@ -19,8 +20,14 @@ pub enum ErrorType {
 }
 
 #[tokio::main]
-async fn main() {
-    println!("Hello, world!");
+async fn main() -> Result<()> {
+    let qdrant_client = Arc::new(
+        QdrantClient::from_url("http://localhost:6333")
+            .build()
+            .map_err(|e| ErrorType::GenericError {
+                e: format!("Failed to create Qdrant Client: {}", e.to_string()),
+            })?,
+    );
 
     (0..2)
         .map(|_| {
@@ -28,14 +35,24 @@ async fn main() {
                 "localhost:9092".to_string(),
                 "test-1".to_string(),
                 "tester".to_string(),
+                qdrant_client.clone(),
+                "tester",
             ))
         })
         .collect::<FuturesUnordered<_>>()
         .for_each(|_| async { () })
-        .await
+        .await;
+
+    Ok(())
 }
 
-async fn run_async_ingestor(brokers: String, group_id: String, input_topic: String) {
+async fn run_async_ingestor(
+    brokers: String,
+    group_id: String,
+    input_topic: String,
+    client: Arc<QdrantClient>,
+    collection_name: &str,
+) -> Result<()> {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("group.id", &group_id)
         .set("bootstrap.servers", &brokers)
@@ -68,21 +85,43 @@ async fn run_async_ingestor(brokers: String, group_id: String, input_topic: Stri
                     message.payload_view::<str>()
                 );
 
+                // process here
+                upload_to_qdrant(
+                    collection_name,
+                    client.clone(),
+                    vec![QdrantPoint {
+                        id: message.offset().into(),
+                        vector: (1..5)
+                            .map(|_| message.offset() as f32)
+                            .collect::<Vec<f32>>(),
+                        payload: serde_json::from_str(
+                            message
+                                .payload_view::<str>()
+                                .unwrap()
+                                .map_err(|e| ErrorType::GenericError { e: e.to_string() })?,
+                        )
+                        .map_err(|e| ErrorType::GenericError { e: e.to_string() })?,
+                    }],
+                )
+                .await?;
+
                 if let Err(e) = consumer.store_offset_from_message(&message) {
-                    eprintln!("Error storing offset: {:?}", e);
+                    println!("Error storing offset: {:?}", e);
                 }
             }
 
-            Err(e) => eprintln!("Kafka error: {}", e),
+            Err(e) => println!("Kafka error: {}", e),
         }
     }
+    Ok(())
 }
 
 async fn upload_to_qdrant(
-    collection_name: String,
-    client: QdrantClient,
+    collection_name: &str,
+    client: Arc<QdrantClient>,
     points: Vec<QdrantPoint>,
 ) -> Result<()> {
+    println!("{:?}", &points);
     let points = points
         .into_iter()
         .map(|point| {
@@ -93,7 +132,16 @@ async fn upload_to_qdrant(
                     e: String::from("Unknown PointID type"),
                 }),
             }?;
-            Ok(PointStruct::new(id, point.vector, point.payload))
+            Ok(PointStruct::new(
+                id,
+                point.vector,
+                match point.payload {
+                    Some(val) => serde_json::from_value::<Payload>(val)
+                        .map_err(|e| ErrorType::GenericError { e: e.to_string() })?,
+                    None => Payload::new(),
+                }
+                .into(),
+            ))
         })
         .collect::<Result<Vec<PointStruct>>>()?;
 

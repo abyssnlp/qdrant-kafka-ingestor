@@ -753,6 +753,7 @@ dependencies = [
  "async-trait",
  "futures",
  "qdrant-client",
+ "rand",
  "rdkafka",
  "serde",
  "serde_json",
