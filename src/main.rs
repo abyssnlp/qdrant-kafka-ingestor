@@ -1,8 +1,6 @@
 mod models;
-use std::sync::Arc;
-
 use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use models::QdrantPoint;
 use qdrant_client::client::{Payload, QdrantClient};
 use qdrant_client::qdrant::PointStruct;
@@ -11,6 +9,8 @@ use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::Message;
 use serde::Serialize;
+use std::sync::Arc;
+use tokio::task::JoinHandle;
 
 pub type Result<T> = core::result::Result<T, ErrorType>;
 
@@ -29,19 +29,24 @@ async fn main() -> Result<()> {
             })?,
     );
 
-    (0..2)
-        .map(|_| {
-            tokio::spawn(run_async_ingestor(
-                "localhost:9092".to_string(),
-                "test-1".to_string(),
-                "tester".to_string(),
-                qdrant_client.clone(),
-                "tester",
-            ))
-        })
-        .collect::<FuturesUnordered<_>>()
-        .for_each(|_| async { () })
-        .await;
+    let mut tasks = Vec::new();
+
+    for _ in 0..2 {
+        let handle = tokio::spawn(run_async_ingestor(
+            "localhost:9092".to_string(),
+            "test-1".to_string(),
+            "tester".to_string(),
+            qdrant_client.clone(),
+            "tester",
+        ));
+        tasks.push(handle);
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            println!("Error: {:?}", e);
+        }
+    }
 
     Ok(())
 }
@@ -85,14 +90,16 @@ async fn run_async_ingestor(
                     message.payload_view::<str>()
                 );
 
+                let owned_message = message.detach();
+
                 // process here
                 upload_to_qdrant(
                     collection_name,
                     client.clone(),
                     vec![QdrantPoint {
-                        id: message.offset().into(),
+                        id: owned_message.offset().into(),
                         vector: (1..5)
-                            .map(|_| message.offset() as f32)
+                            .map(|_| owned_message.offset() as f32)
                             .collect::<Vec<f32>>(),
                         payload: serde_json::from_str(
                             message
