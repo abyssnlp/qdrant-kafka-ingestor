@@ -43,8 +43,13 @@ async fn main() -> Result<()> {
     }
 
     for task in tasks {
-        if let Err(e) = task.await {
-            println!("Error: {:?}", e);
+        let result = task
+            .await
+            .map_err(|e| ErrorType::GenericError { e: e.to_string() })?;
+
+        match result {
+            Ok(_) => println!("Successfully uploaded to qdrant!"),
+            Err(e) => println!("{:?}", e),
         }
     }
 
@@ -111,10 +116,6 @@ async fn run_async_ingestor(
                     }],
                 )
                 .await?;
-
-                if let Err(e) = consumer.store_offset_from_message(&message) {
-                    println!("Error storing offset: {:?}", e);
-                }
             }
 
             Err(e) => println!("Kafka error: {}", e),
