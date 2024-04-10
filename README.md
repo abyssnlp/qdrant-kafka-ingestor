@@ -1,4 +1,4 @@
 Qdrant Queue Ingestion
 ===
 
-*WIP
+Ingest in batches from a stream for example: Kafka, Kinesis
