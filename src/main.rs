@@ -119,25 +119,15 @@ async fn run_async_ingestor(
                             message.payload_view::<str>()
                         );
 
-                        let owned_message = message.detach();
-
-                        let point = QdrantPoint {
-                            id: owned_message.offset().into(),
-                            vector: (1..6)
-                                .map(|_| owned_message.offset() as f32)
-                                .collect::<Vec<f32>>(),
-                            payload: serde_json::from_str(
-                                message
-                                    .payload_view::<str>()
-                                    .unwrap()
-                                    .map_err(|e| ErrorType::GenericError {
-                                        e: format!("Failed to convert payload to qdrant payload: {}", e),
-                                    })?,
-                            )
-                            .map_err(|e| ErrorType::GenericError {
-                                e: format!("Failed to convert payload to qdrant payload (JSON): {}", e),
-                            })?,
-                        };
+                        let point: QdrantPoint = serde_json::from_str(
+                            message.payload_view::<str>()
+                                .unwrap()
+                                .map_err(|e| ErrorType::GenericError {
+                                    e: format!("Failed to extract QdrantPoint from Kafka message: {}", e),
+                                })?,
+                        ).map_err(|e| ErrorType::GenericError {
+                            e: format!("Could not parse QdrantPoint with id, vector and payload (JSON): {}", e),
+                        })?;
 
                         queue.push(point);
                         message_queue.push(message);
