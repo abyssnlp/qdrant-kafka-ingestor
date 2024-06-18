@@ -1,12 +1,13 @@
 mod models;
 use futures::StreamExt;
+use log::{debug, error, info};
 use models::QdrantPoint;
 use qdrant_client::client::{Payload, QdrantClient};
 use qdrant_client::qdrant::{PointId, PointStruct};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::{CommitMode, Consumer};
-use rdkafka::message::{BorrowedMessage, OwnedMessage};
+use rdkafka::message::BorrowedMessage;
 use rdkafka::Message;
 use serde::Serialize;
 use std::sync::Arc;
@@ -22,6 +23,8 @@ pub enum ErrorType {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+
     let qdrant_client = Arc::new(
         QdrantClient::from_url("http://localhost:6334")
             .build()
@@ -49,8 +52,8 @@ async fn main() -> Result<()> {
         })?;
 
         match result {
-            Ok(_) => println!("Successfully uploaded to qdrant!"),
-            Err(e) => println!("{:?}", e),
+            Ok(_) => info!("Successfully uploaded to qdrant!"),
+            Err(e) => error!("{:?}", e),
         }
     }
 
@@ -95,7 +98,7 @@ async fn run_async_ingestor(
         tokio::select! {
             _ = interval.tick() => {
                 if !queue.is_empty() {
-                    println!("Flushing time-based queue of size: {}", queue.len());
+                    info!("Flushing time-based queue of size: {}", queue.len());
                     let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
                     if upload_result == 1 || upload_result == 2 {
                         commit_offset(&consumer, &message_queue).await?;
@@ -108,7 +111,7 @@ async fn run_async_ingestor(
             Some(result) = stream.next() => {
                 match result {
                     Ok(message) => {
-                        println!(
+                        debug!(
                             "Message offset: {}, Message partition: {}, Message key: {:?}, Message body: {:?}",
                             message.offset(),
                             message.partition(),
@@ -140,7 +143,7 @@ async fn run_async_ingestor(
                         message_queue.push(message);
 
                         if queue.len() > FLUSH_THRESHOLD {
-                            println!("Flushing size-based queue of size: {}", queue.len());
+                            info!("Flushing size-based queue of size: {}", queue.len());
                             let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
                             if upload_result == 1 || upload_result == 2 {
                                 commit_offset(&consumer, &message_queue).await?;
@@ -149,7 +152,7 @@ async fn run_async_ingestor(
                             queue.clear();
                         }
                     }
-                    Err(e) => println!("Kafka error: {}", e),
+                    Err(e) => error!("Kafka error: {}", e),
                 }
             }
         }
@@ -163,7 +166,7 @@ async fn upload_to_qdrant(
     client: Arc<QdrantClient>,
     points: Vec<QdrantPoint>,
 ) -> Result<i32> {
-    println!("{:?}", &points);
+    debug!("{:?}", &points);
     let points = points
         .into_iter()
         .map(|point| {
@@ -207,7 +210,7 @@ async fn upload_to_qdrant(
             e: format!("Failed to upload to qdrant: {}", e),
         })?;
 
-    println!("{:?}", result.result);
+    debug!("{:?}", result.result);
     match result.result {
         Some(res) => Ok(res.status),
         None => Err(ErrorType::GenericError {
@@ -220,7 +223,7 @@ async fn commit_offset<'a>(
     consumer: &'a StreamConsumer,
     messages: &'a Vec<BorrowedMessage<'a>>,
 ) -> Result<bool> {
-    println!("Committing offsets: {:?}", messages.len());
+    info!("Committing offsets: {:?}", messages.len());
     if messages.is_empty() {
         return Ok(true);
     }
