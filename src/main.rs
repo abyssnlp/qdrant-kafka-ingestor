@@ -10,6 +10,7 @@ use rdkafka::consumer::{CommitMode, Consumer};
 use rdkafka::message::BorrowedMessage;
 use rdkafka::Message;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub type Result<T> = core::result::Result<T, ErrorType>;
@@ -24,6 +25,8 @@ pub enum ErrorType {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+
+    let running = Arc::new(AtomicBool::new(true));
 
     let qdrant_client = Arc::new(
         QdrantClient::from_url("http://localhost:6334")
@@ -42,6 +45,7 @@ async fn main() -> Result<()> {
             "tester".to_string(),
             qdrant_client.clone(),
             "tester",
+            running.clone(),
         ));
         tasks.push(handle);
     }
@@ -66,6 +70,7 @@ async fn run_async_ingestor(
     input_topic: String,
     client: Arc<QdrantClient>,
     collection_name: &str,
+    running: Arc<AtomicBool>,
 ) -> Result<()> {
     let consumer: StreamConsumer = ClientConfig::new()
         .set("group.id", &group_id)
@@ -94,61 +99,84 @@ async fn run_async_ingestor(
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(FLUSH_TIME));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let mut retry_delay = 2;
+
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                if !queue.is_empty() {
-                    info!("Flushing time-based queue of size: {}", queue.len());
-                    let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
-                    if upload_result == 1 || upload_result == 2 {
-                        commit_offset(&consumer, &message_queue).await?;
-                        message_queue.clear();
-                    }
-                    queue.clear();
-                }
-            }
-
-            Some(result) = stream.next() => {
-                match result {
-                    Ok(message) => {
-                        debug!(
-                            "Message offset: {}, Message partition: {}, Message key: {:?}, Message body: {:?}",
-                            message.offset(),
-                            message.partition(),
-                            message.key_view::<str>(),
-                            message.payload_view::<str>()
-                        );
-
-                        let point: QdrantPoint = serde_json::from_str(
-                            message.payload_view::<str>()
-                                .unwrap()
-                                .map_err(|e| ErrorType::GenericError {
-                                    e: format!("Failed to extract QdrantPoint from Kafka message: {}", e),
-                                })?,
-                        ).map_err(|e| ErrorType::GenericError {
-                            e: format!("Could not parse QdrantPoint with id, vector and payload (JSON): {}", e),
-                        })?;
-
-                        queue.push(point);
-                        message_queue.push(message);
-
-                        if queue.len() > FLUSH_THRESHOLD {
-                            info!("Flushing size-based queue of size: {}", queue.len());
-                            let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
-                            if upload_result == 1 || upload_result == 2 {
-                                commit_offset(&consumer, &message_queue).await?;
+        if running.load(Ordering::SeqCst) {
+            tokio::select! {
+                    _ = interval.tick() => {
+                    if !queue.is_empty() {
+                        info!("Flushing time-based queue of size: {}", queue.len());
+                        let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
+                        if upload_result == 1 || upload_result == 2 {
+                            let is_committed = commit_offset(&consumer, &message_queue).await?;
+                            if !is_committed {
+                                error!("Failed to commit offsets to Kafka");
+                                running.store(false, Ordering::SeqCst);
+                            } else {
                                 message_queue.clear();
+                                queue.clear();
                             }
-                            queue.clear();
+                        } else {
+                            error!("Failed to upload to qdrant");
+                            running.store(false, Ordering::SeqCst);
                         }
                     }
-                    Err(e) => error!("Kafka error: {}", e),
+                }
+
+                Some(result) = stream.next() => {
+                    match result {
+                        Ok(message) => {
+                            debug!(
+                                "Message offset: {}, Message partition: {}, Message key: {:?}, Message body: {:?}",
+                                message.offset(),
+                                message.partition(),
+                                message.key_view::<str>(),
+                                message.payload_view::<str>()
+                            );
+
+                            let point: QdrantPoint = serde_json::from_str(
+                                message.payload_view::<str>()
+                                    .unwrap()
+                                    .map_err(|e| ErrorType::GenericError {
+                                        e: format!("Failed to extract QdrantPoint from Kafka message: {}", e),
+                                    })?,
+                            ).map_err(|e| ErrorType::GenericError {
+                                e: format!("Could not parse QdrantPoint with id, vector and payload (JSON): {}", e),
+                            })?;
+
+                            queue.push(point);
+                            message_queue.push(message);
+
+                            if queue.len() > FLUSH_THRESHOLD {
+                                info!("Flushing size-based queue of size: {}", queue.len());
+                                let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
+                                if upload_result == 1 || upload_result == 2 {
+                                    let is_committed = commit_offset(&consumer, &message_queue).await?;
+                                    if !is_committed {
+                                        error!("Failed to commit offsets to Kafka");
+                                        running.store(false, Ordering::SeqCst);
+                                    } else {
+                                        message_queue.clear();
+                                        queue.clear();
+                                    }
+                                } else {
+                                    error!("Failed to upload to qdrant");
+                                    running.store(false, Ordering::SeqCst);
+                                }
+                            }
+                        }
+                        Err(e) => error!("Kafka error: {}", e),
+                    }
                 }
             }
+        } else {
+            // TODO: Separate running for qdrant and kafka
+            tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
+            retry_delay *= 2; // Exponential backoff
+            running.store(true, Ordering::SeqCst);
         }
     }
-
-    // Ok(())
 }
 
 async fn upload_to_qdrant(
