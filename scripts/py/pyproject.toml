@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "qki-kafka-producer"
+version = "0.0.1"
+description = "Kafka Producer for running integration tests"
+authors = ["Shaurya Rawat <shauryarawat241994@gmail.com>"]
+readme = "README.md"
+packages = [{include = "qki_kafka_producer"}]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+kafka-python = "^2.0.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

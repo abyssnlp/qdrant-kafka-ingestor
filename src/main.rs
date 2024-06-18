@@ -5,7 +5,8 @@ use qdrant_client::client::{Payload, QdrantClient};
 use qdrant_client::qdrant::{PointId, PointStruct};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
-use rdkafka::consumer::Consumer;
+use rdkafka::consumer::{CommitMode, Consumer};
+use rdkafka::message::{BorrowedMessage, OwnedMessage};
 use rdkafka::Message;
 use serde::Serialize;
 use std::sync::Arc;
@@ -84,7 +85,9 @@ async fn run_async_ingestor(
     // if queue reaches threshold or timer > time threshold: batch upsert -> reset queue, reset timer
     // else keep pushing
 
+    // TODO: Keep a single queue of borrowed messages; Convert message to QdrantPoint when ingesting
     let mut queue = Vec::new();
+    let mut message_queue: Vec<BorrowedMessage<'_>> = Vec::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(FLUSH_TIME));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -93,7 +96,11 @@ async fn run_async_ingestor(
             _ = interval.tick() => {
                 if !queue.is_empty() {
                     println!("Flushing time-based queue of size: {}", queue.len());
-                    upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
+                    let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
+                    if upload_result == 1 || upload_result == 2 {
+                        commit_offset(&consumer, &message_queue).await?;
+                        message_queue.clear();
+                    }
                     queue.clear();
                 }
             }
@@ -130,10 +137,15 @@ async fn run_async_ingestor(
                         };
 
                         queue.push(point);
+                        message_queue.push(message);
 
                         if queue.len() > FLUSH_THRESHOLD {
                             println!("Flushing size-based queue of size: {}", queue.len());
-                            upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
+                            let upload_result = upload_to_qdrant(collection_name, client.clone(), queue.clone()).await?;
+                            if upload_result == 1 || upload_result == 2 {
+                                commit_offset(&consumer, &message_queue).await?;
+                                message_queue.clear();
+                            }
                             queue.clear();
                         }
                     }
@@ -150,7 +162,7 @@ async fn upload_to_qdrant(
     collection_name: &str,
     client: Arc<QdrantClient>,
     points: Vec<QdrantPoint>,
-) -> Result<()> {
+) -> Result<i32> {
     println!("{:?}", &points);
     let points = points
         .into_iter()
@@ -196,5 +208,34 @@ async fn upload_to_qdrant(
         })?;
 
     println!("{:?}", result.result);
-    Ok(())
+    match result.result {
+        Some(res) => Ok(res.status),
+        None => Err(ErrorType::GenericError {
+            e: String::from("Failed to get status from qdrant.UpdateResult"),
+        }),
+    }
+}
+
+async fn commit_offset<'a>(
+    consumer: &'a StreamConsumer,
+    messages: &'a Vec<BorrowedMessage<'a>>,
+) -> Result<bool> {
+    println!("Committing offsets: {:?}", messages.len());
+    if messages.is_empty() {
+        return Ok(true);
+    }
+
+    for message in messages {
+        let result = consumer.commit_message(message, CommitMode::Async);
+        match result {
+            Ok(_) => (),
+            Err(e) => {
+                return Err(ErrorType::GenericError {
+                    e: format!("Failed to commit offset: {}", e),
+                })
+            }
+        }
+    }
+
+    Ok(true)
 }
