@@ -25,7 +25,7 @@ def produce_messages(naive=True):
 
             # Send message to Kafka
             producer.send("tester", key=key, value=value)
-            time.sleep(0.2)
+            time.sleep(1)
             count += 1
     else:
         while True:
@@ -37,7 +37,7 @@ def produce_messages(naive=True):
             }
 
             producer.send("tester", key=key, value=value)
-            time.sleep(1)
+            time.sleep(0.2)
             count += 1
 
 
