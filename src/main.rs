@@ -130,15 +130,15 @@ async fn main() -> Result<()> {
         input_topic: input_topic.to_string(),
         collection_name: collection_name.to_string(),
         qdrant_url: qdrant_url.to_string(),
-        flush_time: flush_time,
-        flush_threshold: flush_threshold,
+        flush_time,
+        flush_threshold,
     };
 
     let running = Arc::new(AtomicBool::new(true));
 
     let qdrant_client = Arc::new(QdrantClient::from_url(&qdrant_url).build().map_err(|e| {
         ErrorType::GenericError {
-            e: format!("Failed to create Qdrant Client: {}", e.to_string()),
+            e: format!("Failed to create Qdrant Client: {}", e),
         }
     })?);
 
@@ -315,8 +315,7 @@ async fn upload_to_qdrant(
                         }
                     })?,
                     None => Payload::new(),
-                }
-                .into(),
+                },
             ))
         })
         .collect::<Result<Vec<PointStruct>>>()?;

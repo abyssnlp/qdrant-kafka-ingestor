@@ -1,0 +1,36 @@
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: fmt
+        language: system
+        entry: cargo fmt
+        types:
+          - rust
+        args:
+          - "--all"
+          - "--"
+          - "--check"
+  - repo: local
+    hooks:
+      - id: clippy
+        name: clippy
+        language: system
+        entry: cargo clippy
+        types:
+          - rust
+        args:
+          - "--all-features"
+          - "--"
+          - "-D"
+          - "warnings"
+        pass_filenames: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: check-byte-order-marker
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
