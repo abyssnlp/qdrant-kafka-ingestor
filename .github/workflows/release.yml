@@ -52,7 +52,7 @@ jobs:
             - name: Build for ${{ matrix.arch }}
               run: cross build --target ${{ matrix.arch }} --release
             - name: Publish release
-              uses: svenstaro/upload-release-action@v4
+              uses: svenstaro/upload-release-action@2.6.1
               with:
                 repo_token: ${{ secrets.GITHUB_TOKEN }}
                 file: target/${{ matrix.arch }}/release/qdrant-kafka-ingestor
